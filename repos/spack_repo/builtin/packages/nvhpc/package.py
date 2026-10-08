@@ -647,6 +647,13 @@ class Nvhpc(Package, CompilerPackage):
     )
     variant("examples", default=True, description="Install the examples")
     variant(
+        "sdk_env",
+        default=False,
+        description="Add the bundled CUDA toolkit, math and communication libraries to the run "
+        "environment, as NVIDIA's nvhpc modulefile does. Off by default because the run "
+        "environment of a compiler is also applied to packages built with it",
+    )
+    variant(
         "extra_cuda",
         default=True,
         description="Keep every CUDA version shipped in the tarball. When disabled, only the "
@@ -721,6 +728,34 @@ class Nvhpc(Package, CompilerPackage):
 
     def _version_prefix(self):
         return join_path(self.prefix, "Linux_%s" % self.spec.target.family, self._sdk_version)
+
+    @property
+    def nvhpc_root(self):
+        """Versioned SDK root, ``<prefix>/Linux_<arch>/<version>`` (NVIDIA's ``NVHPC_ROOT``)."""
+        return self._version_prefix()
+
+    @property
+    def cuda_home(self):
+        """CUDA toolkit bundled with the SDK (the unversioned symlinks select the default)."""
+        return join_path(self._version_prefix(), "cuda")
+
+    @property
+    def math_libs_home(self):
+        return join_path(self._version_prefix(), "math_libs")
+
+    @property
+    def comm_libs_home(self):
+        return join_path(self._version_prefix(), "comm_libs")
+
+    @property
+    def modulefiles_dir(self):
+        """Directory with NVIDIA's own modulefiles (nvhpc, nvhpc-nompi, ...), or None.
+
+        ``nvhome`` in them points at this prefix, so environments can add this directory to
+        ``MODULEPATH`` instead of hard-coding the layout.
+        """
+        path = join_path(self.prefix, "modulefiles")
+        return path if os.path.isdir(path) else None
 
     def _compilers_prefix(self):
         return Prefix(join_path(self._version_prefix(), "compilers"))
@@ -834,10 +869,36 @@ class Nvhpc(Package, CompilerPackage):
         env.prepend_path("LD_LIBRARY_PATH", prefix.lib)
         env.prepend_path("MANPATH", prefix.man)
 
+        env.set("NVHPC", self.prefix)
+        env.set("NVHPC_ROOT", self.nvhpc_root)
+        env.set("F90", join_path(prefix.bin, "nvfortran"))
+
+        if "+sdk_env" in self.spec:
+            self._setup_sdk_run_environment(env)
+
         if "+mpi" in self.spec:
             mpi_prefix = self._mpi_prefix()
             env.prepend_path("PATH", mpi_prefix.bin)
             env.prepend_path("LD_LIBRARY_PATH", mpi_prefix.lib)
+
+    def _setup_sdk_run_environment(self, env: EnvironmentModifications) -> None:
+        # Mirrors NVIDIA's own nvhpc modulefile. Only paths that exist are added, since components
+        # can be deselected at install time. Like NVIDIA's module, this does not set LIBRARY_PATH:
+        # the compiler drivers add the -L paths for the default CUDA themselves (use -cudalib=
+        # rather than -lcublas).
+        prefix = self._compilers_prefix()
+        comm = Prefix(self.comm_libs_home)
+        math = Prefix(self.math_libs_home)
+        cuda = Prefix(self.cuda_home)
+        qd = Prefix(join_path(prefix, "extras", "qd"))
+        for var, paths in (
+            ("PATH", [cuda.bin, qd.bin]),
+            ("LD_LIBRARY_PATH", [cuda.lib64, math.lib64, comm.nccl.lib, comm.nvshmem.lib, qd.lib]),
+            ("CPATH", [math.include, comm.nccl.include, comm.nvshmem.include]),
+        ):
+            for path in reversed(paths):
+                if os.path.isdir(path):
+                    env.prepend_path(var, path)
 
     def setup_dependent_build_environment(
         self, env: EnvironmentModifications, dependent_spec: Spec
@@ -846,6 +907,7 @@ class Nvhpc(Package, CompilerPackage):
 
         env.prepend_path("LIBRARY_PATH", prefix.lib)
         env.prepend_path("LD_LIBRARY_PATH", prefix.lib)
+        env.set("NVHPC_ROOT", self.nvhpc_root)
 
         if "+mpi" in self.spec:
             mpi_prefix = self._mpi_prefix()
