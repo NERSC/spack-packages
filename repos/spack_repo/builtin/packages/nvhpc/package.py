@@ -599,8 +599,19 @@ class Nvhpc(Package, CompilerPackage):
         # TODO: use other exes to determine default_cuda/install_type/blas/lapack/mpi variants
         return "~blas~lapack~mpi", {"compilers": cls.determine_compiler_paths(exes=exes)}
 
+    @property
+    def _sdk_version(self):
+        # Directory name used by the installer, e.g. "26.5"
+        return str(self.spec.version.up_to(2))
+
     def _version_prefix(self):
-        return join_path(self.prefix, "Linux_%s" % self.spec.target.family, self.version)
+        return join_path(self.prefix, "Linux_%s" % self.spec.target.family, self._sdk_version)
+
+    def _compilers_prefix(self):
+        return Prefix(join_path(self._version_prefix(), "compilers"))
+
+    def _mpi_prefix(self):
+        return Prefix(join_path(self._version_prefix(), "comm_libs", "mpi"))
 
     def setup_build_environment(self, env: EnvironmentModifications) -> None:
         env.set("NVHPC_SILENT", "true")
@@ -642,9 +653,7 @@ class Nvhpc(Package, CompilerPackage):
         makelocalrc(*makelocalrc_args)
 
     def setup_run_environment(self, env: EnvironmentModifications) -> None:
-        prefix = Prefix(
-            join_path(self.prefix, "Linux_%s" % self.spec.target.family, self.version, "compilers")
-        )
+        prefix = self._compilers_prefix()
 
         env.set("CC", join_path(prefix.bin, "nvc"))
         env.set("CXX", join_path(prefix.bin, "nvc++"))
@@ -657,38 +666,20 @@ class Nvhpc(Package, CompilerPackage):
         env.prepend_path("MANPATH", prefix.man)
 
         if "+mpi" in self.spec:
-            mpi_prefix = Prefix(
-                join_path(
-                    self.prefix,
-                    "Linux_%s" % self.spec.target.family,
-                    self.version,
-                    "comm_libs",
-                    "mpi",
-                )
-            )
+            mpi_prefix = self._mpi_prefix()
             env.prepend_path("PATH", mpi_prefix.bin)
             env.prepend_path("LD_LIBRARY_PATH", mpi_prefix.lib)
 
     def setup_dependent_build_environment(
         self, env: EnvironmentModifications, dependent_spec: Spec
     ) -> None:
-        prefix = Prefix(
-            join_path(self.prefix, "Linux_%s" % self.spec.target.family, self.version, "compilers")
-        )
+        prefix = self._compilers_prefix()
 
         env.prepend_path("LIBRARY_PATH", prefix.lib)
         env.prepend_path("LD_LIBRARY_PATH", prefix.lib)
 
         if "+mpi" in self.spec:
-            mpi_prefix = Prefix(
-                join_path(
-                    self.prefix,
-                    "Linux_%s" % self.spec.target.family,
-                    self.version,
-                    "comm_libs",
-                    "mpi",
-                )
-            )
+            mpi_prefix = self._mpi_prefix()
 
             env.prepend_path("LD_LIBRARY_PATH", mpi_prefix.lib)
 
@@ -704,15 +695,7 @@ class Nvhpc(Package, CompilerPackage):
 
     def setup_dependent_package(self, module, dependent_spec):
         if "+mpi" in self.spec or self.provides("mpi"):
-            mpi_prefix = Prefix(
-                join_path(
-                    self.prefix,
-                    "Linux_%s" % self.spec.target.family,
-                    self.version,
-                    "comm_libs",
-                    "mpi",
-                )
-            )
+            mpi_prefix = self._mpi_prefix()
 
             self.spec.mpicc = join_path(mpi_prefix.bin, "mpicc")
             self.spec.mpicxx = join_path(mpi_prefix.bin, "mpicxx")
@@ -721,9 +704,7 @@ class Nvhpc(Package, CompilerPackage):
 
     @property
     def libs(self):
-        prefix = Prefix(
-            join_path(self.prefix, "Linux_%s" % self.spec.target.family, self.version, "compilers")
-        )
+        prefix = self._compilers_prefix()
         libs = []
 
         if "+blas" in self.spec:
@@ -736,19 +717,19 @@ class Nvhpc(Package, CompilerPackage):
         return find_libraries(libs, root=prefix, recursive=True)
 
     def _cc_path(self):
-        candidates = glob.glob(f"{self.prefix}/**/{self.spec.version}/compilers/bin/nvc")
+        candidates = glob.glob(f"{self.prefix}/**/{self._sdk_version}/compilers/bin/nvc")
         if not candidates:
             return None
         return candidates[0]
 
     def _cxx_path(self):
-        candidates = glob.glob(f"{self.prefix}/**/{self.spec.version}/compilers/bin/nvc++")
+        candidates = glob.glob(f"{self.prefix}/**/{self._sdk_version}/compilers/bin/nvc++")
         if not candidates:
             return None
         return candidates[0]
 
     def _fortran_path(self):
-        candidates = glob.glob(f"{self.prefix}/**/{self.spec.version}/compilers/bin/nvfortran")
+        candidates = glob.glob(f"{self.prefix}/**/{self._sdk_version}/compilers/bin/nvfortran")
         if not candidates:
             return None
         return candidates[0]
