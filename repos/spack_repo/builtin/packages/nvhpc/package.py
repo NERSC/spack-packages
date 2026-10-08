@@ -511,6 +511,78 @@ _versions = {
     },
 }
 
+# Single-CUDA tarballs (``..._cuda_<X.Y>.tar.gz``). NVIDIA publishes exactly one per release (and
+# none before 25.9), so these are exposed as separate versions, e.g. ``nvhpc@26.5-cuda13.2``.
+# They are roughly half the download and install size of the default ``cuda_multi`` versions.
+_single_cuda_versions = {
+    "26.9": {
+        "cuda": "13.3",
+        "Linux-aarch64": (
+            "acf0d8ea9fc1b5457b16481b1067c742e6610989865e18be93e383d9ded37e2a",
+            "https://developer.download.nvidia.com/hpc-sdk/26.9/nvhpc_2026_269_Linux_aarch64_cuda_13.3.tar.gz",
+        ),
+        "Linux-x86_64": (
+            "e1bbf2ccdb112a3773d2cc141f09fb1d087562e266ec7ec7adb30a0519d45877",
+            "https://developer.download.nvidia.com/hpc-sdk/26.9/nvhpc_2026_269_Linux_x86_64_cuda_13.3.tar.gz",
+        ),
+    },
+    "26.5": {
+        "cuda": "13.2",
+        "Linux-aarch64": (
+            "4a7c8fd4d429f5d04634163d7c40840a8802aac57a9357f9a1f9b1cdb5203de8",
+            "https://developer.download.nvidia.com/hpc-sdk/26.5/nvhpc_2026_265_Linux_aarch64_cuda_13.2.tar.gz",
+        ),
+        "Linux-x86_64": (
+            "8849b3909f7e75df4c32af4dc585bf0701d85495da43221b090a9af77df203b6",
+            "https://developer.download.nvidia.com/hpc-sdk/26.5/nvhpc_2026_265_Linux_x86_64_cuda_13.2.tar.gz",
+        ),
+    },
+    "26.3": {
+        "cuda": "13.1",
+        "Linux-aarch64": (
+            "b7cb60c89e149e2695bc69cdee79270922d681689cdf41c40217ddd15231cdc9",
+            "https://developer.download.nvidia.com/hpc-sdk/26.3/nvhpc_2026_263_Linux_aarch64_cuda_13.1.tar.gz",
+        ),
+        "Linux-x86_64": (
+            "94468e4ecbd481722afc8235233d3e93a1e994c0289fa7783329aafab53a5bb3",
+            "https://developer.download.nvidia.com/hpc-sdk/26.3/nvhpc_2026_263_Linux_x86_64_cuda_13.1.tar.gz",
+        ),
+    },
+    "26.1": {
+        "cuda": "13.1",
+        "Linux-aarch64": (
+            "d431313607806aba3555b65788592042926c68dde520c05820b54aa059d421e9",
+            "https://developer.download.nvidia.com/hpc-sdk/26.1/nvhpc_2026_261_Linux_aarch64_cuda_13.1.tar.gz",
+        ),
+        "Linux-x86_64": (
+            "0a08c187183d3c94e39fb55d1acb3635d9a05760b43c05c56bd34b084b3aefad",
+            "https://developer.download.nvidia.com/hpc-sdk/26.1/nvhpc_2026_261_Linux_x86_64_cuda_13.1.tar.gz",
+        ),
+    },
+    "25.11": {
+        "cuda": "13.0",
+        "Linux-aarch64": (
+            "17477e4bb335aa3e911470897b0fdb819d901dbf2d975ac55cc2fc41f388118a",
+            "https://developer.download.nvidia.com/hpc-sdk/25.11/nvhpc_2025_2511_Linux_aarch64_cuda_13.0.tar.gz",
+        ),
+        "Linux-x86_64": (
+            "efde4aa63bec41dc5a59e964a46b4e3e3a5d89a0af0f342f2d0dd94ec51b7a0d",
+            "https://developer.download.nvidia.com/hpc-sdk/25.11/nvhpc_2025_2511_Linux_x86_64_cuda_13.0.tar.gz",
+        ),
+    },
+    "25.9": {
+        "cuda": "13.0",
+        "Linux-aarch64": (
+            "91515c69018a03d45aea12a7881f192d10fd7b6e34100d6dfb1c1e3789bcf184",
+            "https://developer.download.nvidia.com/hpc-sdk/25.9/nvhpc_2025_259_Linux_aarch64_cuda_13.0.tar.gz",
+        ),
+        "Linux-x86_64": (
+            "7dc58c847b572da32eacaa38cbdbbafee1237678b21c1fc45477fc08247c9f5c",
+            "https://developer.download.nvidia.com/hpc-sdk/25.9/nvhpc_2025_259_Linux_x86_64_cuda_13.0.tar.gz",
+        ),
+    },
+}
+
 
 class Nvhpc(Package, CompilerPackage):
     """The NVIDIA HPC SDK is a comprehensive suite of compilers, libraries
@@ -538,7 +610,15 @@ class Nvhpc(Package, CompilerPackage):
         key = "{0}-{1}".format(platform.system(), platform.machine())
         pkg = packages.get(key)
         if pkg:
-            version(ver, sha256=pkg[0], url=pkg[1])
+            # Prefer the default (multi-CUDA) tarball over a single-CUDA flavor of the same
+            # release, which would otherwise sort higher and satisfy ``@ver``.
+            version(ver, sha256=pkg[0], url=pkg[1], preferred=True)
+
+    for ver, packages in _single_cuda_versions.items():
+        key = "{0}-{1}".format(platform.system(), platform.machine())
+        pkg = packages.get(key)
+        if pkg:
+            version(f"{ver}-cuda{packages['cuda']}", sha256=pkg[0], url=pkg[1])
 
     depends_on("gcc languages=c,c++,fortran", type="run")
 
@@ -598,6 +678,21 @@ class Nvhpc(Package, CompilerPackage):
     def determine_variants(cls, exes, version_str):
         # TODO: use other exes to determine default_cuda/install_type/blas/lapack/mpi variants
         return "~blas~lapack~mpi", {"compilers": cls.determine_compiler_paths(exes=exes)}
+
+    @property
+    def cuda_version(self):
+        """Default CUDA version of the install, or None if it is not known yet.
+
+        A single-CUDA version (e.g. ``nvhpc@26.5-cuda13.2``) states it. Otherwise it is read from
+        the ``cuda/bin`` symlink created by the installer.
+        """
+        suffix = str(self.spec.version).partition("-cuda")[2]
+        if suffix:
+            return suffix
+        link = join_path(self._version_prefix(), "cuda", "bin")
+        if os.path.islink(link):
+            return os.path.basename(os.path.dirname(os.readlink(link)))
+        return None
 
     @property
     def _sdk_version(self):
