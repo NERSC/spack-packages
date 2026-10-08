@@ -6,6 +6,8 @@
 import glob
 import os.path
 import platform
+import re
+import shutil
 
 from spack_repo.builtin.build_systems.compiler import CompilerPackage
 from spack_repo.builtin.build_systems.generic import Package
@@ -636,6 +638,24 @@ class Nvhpc(Package, CompilerPackage):
         "default_cuda", default="default", description="Default CUDA version, for example 11.8"
     )
 
+    variant("profilers", default=True, description="Install Nsight profilers")
+    variant("math_libs", default=True, description="Install the CUDA math libraries")
+    variant(
+        "comm_libs",
+        values=any_combination_of("nccl", "nvshmem", "hpcx").with_default("nccl,nvshmem,hpcx"),
+        description="Communication libraries to install (hpcx provides the MPI)",
+    )
+    variant("examples", default=True, description="Install the examples")
+    variant(
+        "extra_cuda",
+        default=True,
+        description="Keep every CUDA version shipped in the tarball. When disabled, only the "
+        "default CUDA version is kept (see default_cuda; by default the newest). "
+        "Has no effect on single-CUDA versions such as 26.5-cuda13.2",
+    )
+
+    requires("comm_libs=hpcx", when="+mpi", msg="+mpi uses the HPC-X MPI from comm_libs")
+
     provides("blas", when="+blas")
     provides("lapack", when="+lapack")
     provides("mpi", when="+mpi")
@@ -722,6 +742,58 @@ class Nvhpc(Package, CompilerPackage):
         else:
             env.set("NVHPC_INSTALL_TYPE", "single")
 
+    def _prune_staged_sdk(self, install):
+        """Remove deselected components from the unpacked tarball before running ./install."""
+        staged = join_path(
+            self.stage.source_path,
+            "install_components",
+            "Linux_%s" % self.spec.target.family,
+            self._sdk_version,
+        )
+        variants = self.spec.variants
+
+        def cuda_dirs(component):
+            root = join_path(staged, component)
+            if not os.path.isdir(root):
+                return []
+            return [d for d in os.listdir(root) if re.fullmatch(r"\d+\.\d+", d)]
+
+        available = sorted(cuda_dirs("cuda"), key=Version)
+        default_cuda = variants["default_cuda"].value
+        if default_cuda != "default" and default_cuda not in available:
+            raise InstallError(
+                f"default_cuda={default_cuda} is not shipped by this tarball; "
+                f"available CUDA versions: {', '.join(available)}"
+            )
+
+        if "~extra_cuda" in self.spec:
+            # The installer would pick the default from the build host's driver, which is not
+            # reproducible, so choose explicitly.
+            keep = available[-1] if default_cuda == "default" else default_cuda
+            install.add_default_env("NVHPC_DEFAULT_CUDA", keep)
+            for component in ("cuda", "math_libs", "comm_libs", "profilers"):
+                for version in cuda_dirs(component):
+                    if version != keep:
+                        shutil.rmtree(join_path(staged, component, version))
+
+        for variant_name in ("profilers", "math_libs", "examples"):
+            if not variants[variant_name].value:
+                shutil.rmtree(join_path(staged, variant_name), ignore_errors=True)
+
+        comm_root = join_path(staged, "comm_libs")
+        comm_libs = set(variants["comm_libs"].value) - {"none"}
+        if not comm_libs:
+            shutil.rmtree(comm_root, ignore_errors=True)
+            return
+        for lib in {"nccl", "nvshmem", "hpcx"} - comm_libs:
+            for version in cuda_dirs("comm_libs"):
+                shutil.rmtree(join_path(comm_root, version, lib), ignore_errors=True)
+        if "hpcx" not in comm_libs:
+            # Unversioned MPI tree and its "mpi" alias
+            shutil.rmtree(join_path(comm_root, "hpcx"), ignore_errors=True)
+            if os.path.islink(join_path(comm_root, "mpi")):
+                os.unlink(join_path(comm_root, "mpi"))
+
     def install(self, spec, prefix):
         compilers_bin = join_path(self._version_prefix(), "compilers", "bin")
         install = Executable("./install")
@@ -740,6 +812,8 @@ class Nvhpc(Package, CompilerPackage):
         if self.spec.variants["install_type"].value == "network":
             local_dir = join_path(self._version_prefix(), "share_objects")
             makelocalrc_args.extend(["-net", local_dir])
+
+        self._prune_staged_sdk(install)
 
         # Run install script
         install()
