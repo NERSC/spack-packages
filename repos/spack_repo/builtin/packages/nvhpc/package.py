@@ -661,7 +661,20 @@ class Nvhpc(Package, CompilerPackage):
         "Has no effect on single-CUDA versions such as 26.5-cuda13.2",
     )
 
+    variant(
+        "cuda",
+        default=True,
+        description="Keep the bundled CUDA toolkit. Disabling it removes the toolkit after "
+        "installation, giving a CPU-only compiler install, and requires ~math_libs, ~profilers, "
+        "~sdk_env and comm_libs=none",
+    )
+
     requires("comm_libs=hpcx", when="+mpi", msg="+mpi uses the HPC-X MPI from comm_libs")
+    requires(
+        "~math_libs ~profilers ~sdk_env comm_libs=none",
+        when="~cuda",
+        msg="~cuda also removes the components that need the CUDA toolkit",
+    )
 
     provides("blas", when="+blas")
     provides("lapack", when="+lapack")
@@ -855,6 +868,10 @@ class Nvhpc(Package, CompilerPackage):
 
         # Update localrc to use Spack gcc
         makelocalrc(*makelocalrc_args)
+
+        if "~cuda" in self.spec:
+            # ./install and makelocalrc fail without the toolkit, so remove it last
+            shutil.rmtree(join_path(self._version_prefix(), "cuda"))
 
     def setup_run_environment(self, env: EnvironmentModifications) -> None:
         prefix = self._compilers_prefix()
