@@ -663,17 +663,35 @@ class Nvhpc(Package, CompilerPackage):
 
     variant(
         "cuda",
-        default=True,
-        description="Keep the bundled CUDA toolkit. Disabling it removes the toolkit after "
-        "installation, giving a CPU-only compiler install, and requires ~math_libs, ~profilers, "
-        "~sdk_env and comm_libs=none",
+        default="bundled",
+        values=("bundled", "external", "none"),
+        multi=False,
+        description="CUDA toolkit used by the compilers: the SDK's own (bundled), a Spack cuda "
+        "package that is wired into the compilers' localrc (external), or none for a CPU-only "
+        "compiler install. external and none remove the bundled toolkit after installation and "
+        "require ~math_libs, ~profilers, ~sdk_env and comm_libs=none",
     )
+
+    # Only needed to name the toolkit in localrc; a link dependency is relocated with the install
+    # and, unlike a run dependency, does not add the toolkit's bin directory to the PATH of
+    # packages built with this compiler.
+    depends_on("cuda", type="link", when="cuda=external")
 
     requires("comm_libs=hpcx", when="+mpi", msg="+mpi uses the HPC-X MPI from comm_libs")
     requires(
         "~math_libs ~profilers ~sdk_env comm_libs=none",
-        when="~cuda",
-        msg="~cuda also removes the components that need the CUDA toolkit",
+        when="cuda=none",
+        msg="cuda=none also removes the components that need the CUDA toolkit",
+    )
+    requires(
+        "~math_libs ~profilers ~sdk_env comm_libs=none",
+        when="cuda=external",
+        msg="cuda=external also removes the components that need the bundled CUDA toolkit",
+    )
+    requires(
+        "default_cuda=default",
+        when="cuda=external",
+        msg="the CUDA version of cuda=external comes from the cuda dependency",
     )
 
     provides("blas", when="+blas")
@@ -726,6 +744,8 @@ class Nvhpc(Package, CompilerPackage):
         A single-CUDA version (e.g. ``nvhpc@26.5-cuda13.2``) states it. Otherwise it is read from
         the ``cuda/bin`` symlink created by the installer.
         """
+        if "cuda=external" in self.spec:
+            return str(self.spec["cuda"].version.up_to(2))
         suffix = str(self.spec.version).partition("-cuda")[2]
         if suffix:
             return suffix
@@ -749,7 +769,15 @@ class Nvhpc(Package, CompilerPackage):
 
     @property
     def cuda_home(self):
-        """CUDA toolkit bundled with the SDK (the unversioned symlinks select the default)."""
+        """CUDA toolkit used by the compilers, or None for ``cuda=none``.
+
+        With ``cuda=bundled`` it is the toolkit in the SDK (the unversioned symlinks select the
+        default); with ``cuda=external`` it is the prefix of the cuda dependency.
+        """
+        if "cuda=external" in self.spec:
+            return str(self.spec["cuda"].prefix)
+        if "cuda=none" in self.spec:
+            return None
         return join_path(self._version_prefix(), "cuda")
 
     @property
@@ -860,6 +888,9 @@ class Nvhpc(Package, CompilerPackage):
         if self.spec.variants["install_type"].value == "network":
             local_dir = join_path(self._version_prefix(), "share_objects")
             makelocalrc_args.extend(["-net", local_dir])
+        if "cuda=external" in self.spec:
+            # Name the version instead of letting makelocalrc pick it from the build node's driver
+            makelocalrc_args.extend(["-cuda", self.cuda_version])
 
         self._prune_staged_sdk(install)
 
@@ -869,9 +900,49 @@ class Nvhpc(Package, CompilerPackage):
         # Update localrc to use Spack gcc
         makelocalrc(*makelocalrc_args)
 
-        if "~cuda" in self.spec:
+        if "cuda=bundled" not in self.spec:
             # ./install and makelocalrc fail without the toolkit, so remove it last
             shutil.rmtree(join_path(self._version_prefix(), "cuda"))
+            self._remove_unusable_sdk_files()
+
+        if "cuda=external" in self.spec:
+            # NVIDIA's documented hook for the CUDA toolkit location (rcfiles/cudaselectrc).
+            # NVHPC_CUDA_HOME in the environment still overrides it.
+            with open(join_path(compilers_bin, "localrc"), "a") as localrc:
+                localrc.write(f"set DEFAULT_CUDA_HOME={self.cuda_home};\n")
+            self._remove_cuda_wrappers()
+
+    def _remove_unusable_sdk_files(self):
+        """Remove files that refer to the toolkit and components removed from this install."""
+        root = self._version_prefix()
+        # NVIDIA's modulefiles point at cuda/, math_libs/ and comm_libs/; REDIST links into them
+        shutil.rmtree(join_path(self.prefix, "modulefiles"), ignore_errors=True)
+        shutil.rmtree(join_path(root, "REDIST"), ignore_errors=True)
+
+    def _remove_cuda_wrappers(self):
+        """Remove the SDK's Nsight wrappers, which cannot work here and are in the cuda package.
+
+        The SDK's ncu, nsys and their UIs look for profilers/<cuda>/ inside the SDK, which is
+        not installed with cuda=external; the cuda package provides the same tools and they stay
+        reachable through its bin directory. nv-nsight-cu-cli is a link to ncu. The other wrappers
+        either work through localrc (nvcc, cuobjdump, compute-sanitizer, cuda-gdb) or print
+        NVIDIA's own message for tools that CUDA 13 removed (nvprof, cuda-memcheck), and are kept.
+        """
+        compilers_bin = join_path(self._version_prefix(), "compilers", "bin")
+        for name in (
+            "ncu",
+            "ncu-ui",
+            "nsys",
+            "nsys-ui",
+            "nv-nsight-cu-cli",
+            ".ncurc",
+            ".ncuuirc",
+            ".nsysrc",
+            ".nsysuirc",
+        ):
+            path = join_path(compilers_bin, name)
+            if os.path.lexists(path):
+                os.unlink(path)
 
     def setup_run_environment(self, env: EnvironmentModifications) -> None:
         prefix = self._compilers_prefix()
